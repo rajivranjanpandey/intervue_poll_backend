@@ -5,6 +5,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const lodash = require('lodash');
 
 // Create the Express app
 const app = express();
@@ -50,6 +51,22 @@ app.post('/poll', (req, res) => {
         res.status(500).json({ message: "Unable to broadcast the question" });
     }
 });
+app.post('/poll-answer', (req, res) => {
+    const updatedResult = updateLivePoll(req.body);
+    if (updatedResult) {
+        io.emit('liveResults', updatedResult);
+    }
+})
+app.get('/live-poll', (req, res) => {
+    const dt = getLivePoll();
+    if (dt)
+        res.status(200).json(dt);
+    else
+        res.status(404).json({ message: 'No active poll' })
+})
+app.get('/poll-history', (req, res) => {
+    res.status(200).json(getPollHistory());
+})
 app.delete('/kickout/:studentId', (req, res) => {
     const { studentId } = req.params;
     deleteStudent(studentId);
@@ -63,6 +80,7 @@ io.on('connection', (socket) => {
 
     // Register student or teacher
     socket.on('register', ({ role, name }) => {
+        console.log('registeration event', { role, name });
         if (role === 'teacher') {
             DB.teachers[socket.id] = { name, id: socket.id };
             console.log(`Teacher connected: ${name}`);
@@ -108,14 +126,17 @@ function getQuestions(questionId) {
         return DB.questions.values();
 }
 function createNewQuestion({ question, options }) {
-    const questionId = v4();
+    const questionId = uuidv4();
     const record = { id: questionId, question, options }
     DB.questions.set(questionId, record);
     return record;
 }
 // Poll History
+function getPollHistory() {
+    Array.from(DB.history.values())
+}
 function createNewPollHistory() {
-    const previousPoll = _.cloneDeep(DB.livePoll);
+    const previousPoll = lodash.cloneDeep(DB.livePoll);
     const [questionId, pollResults] = Object.entries(previousPoll);
     DB.history.set(questionId, pollResults);
     DB.livePoll = {};
@@ -123,20 +144,21 @@ function createNewPollHistory() {
 }
 // Live Poll
 function getLivePoll() {
-    return DB.livePoll;
+    return Object.values(DB.livePoll)[0];
 }
 function createLivePoll(questionObj) {
     const { id: questionId, options, question } = questionObj;
     const optionBasedPollInit = options.reduce((acc, option, index) => {
-        acc[index + 1] = { students: [], selection_percent: 0 };
+        acc[option.text] = { students: [], selection_percent: 0 };
         return acc;
     }, {});
 
     DB.livePoll = {
         [questionId]: {
-            question,
+            question: questionObj,
             answers: optionBasedPollInit,
-            submissions: 0
+            submissions: 0,
+            continuePolling: true
         }
     }
     return true;
@@ -145,9 +167,15 @@ function updateLivePoll(payload) {
     const questionId = payload.question_id;
     if (DB.livePoll[questionId]) {
         const activeResults = DB.livePoll[questionId];
-        activeResults.submissions += 1;
-        activeResults.students.push(socket.id);
-        activeResults.selection_percent = (activeResults.students.length / activeResults.submissions) * 100;
+        if (activeResults.continuePolling) {
+            activeResults.submissions += 1;
+            const optionSelection = activeResults[payload.selected_option]
+            optionSelection.students.push(socket.id);
+            optionSelection.selection_percent = (optionSelection.students.length / optionSelection.submissions) * 100;
+            if (activeResults.submissions === getStudents().length) {
+                activeResults.continuePolling = false;
+            }
+        }
         return DB.livePoll;
     } else {
         return false
@@ -165,7 +193,7 @@ function createActiveQuestion(questionId) {
 }
 // Students
 function getStudents() {
-    return DB.students.values();
+    return Array.from(DB.students.values());
 }
 function createStudent({ name, id }) {
     DB.students[id] = { name, id };
